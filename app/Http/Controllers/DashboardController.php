@@ -34,21 +34,14 @@ class DashboardController extends Controller
 
     public function query(Request $request)
     {
-        Log::info('Query endpoint hit', ['request' => $request->all()]);
-        
         try {
             $query = $request->input('query');
             
             if (empty($query)) {
-                Log::warning('Empty query received');
-                return response()->json([
-                    'success' => false,
-                    'error' => 'Query cannot be empty'
-                ], 400);
+                return redirect()->route('dashboard')
+                    ->with('error', 'Query cannot be empty');
             }
 
-            Log::info('Processing query', ['query' => $query]);
-            
             // Get inventory data
             $data = [
                 'categories' => Category::with('products')->get(),
@@ -56,19 +49,11 @@ class DashboardController extends Controller
                 'transactions' => InventoryTransaction::with(['product.category'])->get(),
             ];
 
-            Log::info('Retrieved inventory data', [
-                'categories_count' => $data['categories']->count(),
-                'products_count' => $data['products']->count(),
-                'transactions_count' => $data['transactions']->count()
-            ]);
-
             // Format data for Gemini
             $context = $this->formatDataForGemini($data);
 
             // Create the prompt
             $prompt = "Given the following inventory data:\n\n" . $context . "\n\n" . $query;
-
-            Log::info('Sending prompt to Gemini', ['prompt' => $prompt]);
 
             // Make the API request using the Gemini package
             $result = Gemini::generativeModel(model: 'gemini-2.0-flash')
@@ -76,23 +61,18 @@ class DashboardController extends Controller
 
             $generatedText = $result->text();
 
-            Log::info('Received response from Gemini', ['response' => $generatedText]);
+            // Parse the response to extract structured data
+            $structuredData = $this->parseGeminiResponse($generatedText, $data);
 
-            return response()->json([
-                'success' => true,
-                'result' => $generatedText
+            return view('dashboard.query-results', [
+                'result' => $generatedText,
+                'structuredData' => $structuredData,
+                'prompt' => $query
             ]);
 
         } catch (\Exception $e) {
-            Log::error('Error processing query', [
-                'error' => $e->getMessage(),
-                'trace' => $e->getTraceAsString()
-            ]);
-
-            return response()->json([
-                'success' => false,
-                'error' => 'Error processing your query: ' . $e->getMessage()
-            ], 500);
+            return redirect()->route('dashboard')
+                ->with('error', 'Error processing your query: ' . $e->getMessage());
         }
     }
 
@@ -114,5 +94,51 @@ class DashboardController extends Controller
         }
 
         return $formatted;
+    }
+
+    private function parseGeminiResponse($response, $data)
+    {
+        $structuredData = [
+            'summary' => $response,
+            'categories' => [],
+            'products' => [],
+            'transactions' => []
+        ];
+
+        // Extract category information
+        foreach ($data['categories'] as $category) {
+            $structuredData['categories'][] = [
+                'id' => $category->id,
+                'name' => $category->name,
+                'product_count' => $category->products->count(),
+                'total_stock' => $category->products->sum('quantity')
+            ];
+        }
+
+        // Extract product information
+        foreach ($data['products'] as $product) {
+            $structuredData['products'][] = [
+                'id' => $product->id,
+                'name' => $product->name,
+                'sku' => $product->sku,
+                'category' => $product->category->name,
+                'quantity' => $product->quantity,
+                'price' => $product->price
+            ];
+        }
+
+        // Extract recent transactions
+        foreach ($data['transactions']->take(10) as $transaction) {
+            $structuredData['transactions'][] = [
+                'id' => $transaction->id,
+                'type' => $transaction->type,
+                'quantity' => $transaction->quantity,
+                'product_name' => $transaction->product->name,
+                'notes' => $transaction->notes,
+                'created_at' => $transaction->created_at->format('Y-m-d H:i:s')
+            ];
+        }
+
+        return $structuredData;
     }
 } 
